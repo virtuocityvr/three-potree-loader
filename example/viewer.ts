@@ -1,6 +1,13 @@
-import { Group, OrthographicCamera, PerspectiveCamera, Scene, WebGLRenderer } from 'three';
+import { Vector3, Group, OrthographicCamera, PerspectiveCamera, Scene, WebGLRenderer } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
-import { PointCloudOctree, Potree, PotreeVersion } from '../src';
+import {
+  PointCloudOctree,
+  Potree,
+  PotreeVersion,
+  PointColorType,
+  PointSizeType,
+  PointCloudMaterial,
+} from '../src';
 
 export class Viewer {
   /**
@@ -14,6 +21,9 @@ export class Viewer {
   private renderer1 = new WebGLRenderer();
   private renderer2 = new WebGLRenderer();
   private renderer3: WebGLRenderer | undefined;
+
+  private materialOpaque = new PointCloudMaterial();
+  private materialTransparent = new PointCloudMaterial();
   /**
    * Our scene which will contain the point cloud.
    */
@@ -33,7 +43,6 @@ export class Viewer {
    * Out potree instance which handles updating point clouds, keeps track of loaded nodes, etc.
    */
   private potree = new Potree('v1');
-  // private potree_v2 = new Potree('v2');
   /**
    * Array of point clouds which are in the scene and need to be updated.
    */
@@ -67,7 +76,21 @@ export class Viewer {
     this.orthoCamera.lookAt(0, 0, 0);
 
     this.orthoCameraControls = new OrbitControls(this.orthoCamera, this.topViewEl);
+    this.orthoCameraControls.rotateSpeed = 0;
+
+    this.camera.position.set(-3, 0, 6);
+    this.camera.lookAt(new Vector3());
     this.cameraControls = new OrbitControls(this.camera, this.perspectiveViewEl);
+
+    this.materialOpaque.size = 0.1;
+    this.materialOpaque.pointColorType = PointColorType.RGB;
+    // adaptive point size doesn't work because of a bug with LOD when rendering multiple times during a frame
+    this.materialOpaque.pointSizeType = PointSizeType.ATTENUATED;
+
+    this.materialTransparent.size = 0.1;
+    this.materialTransparent.opacity = 0.1;
+    this.materialTransparent.pointColorType = PointColorType.HEIGHT;
+    this.materialTransparent.pointSizeType = PointSizeType.FIXED;
 
     this.resize();
     window.addEventListener('resize', this.resize);
@@ -124,16 +147,21 @@ export class Viewer {
    * @param baseUrl
    *    The url where the point cloud is located and from where we should load the octree nodes.
    */
-  load(
-    fileName: string,
-    baseUrl: string,
-  ): Promise<PointCloudOctree> {
-    return this.potree.loadPointCloud(
-      // The file name of the point cloud which is to be loaded.
-      fileName,
-      // Given the relative URL of a file, should return a full URL.
-      url => `${baseUrl}${url}`,
-    );
+  load(fileName: string, baseUrl: string): Promise<PointCloudOctree> {
+    return this.potree
+      .loadPointCloud(
+        // The file name of the point cloud which is to be loaded.
+        fileName,
+        // Given the relative URL of a file, should return a full URL.
+        url => `${baseUrl}${url}`,
+      )
+      .then(pco => {
+        //this.materialTransparent.elevationRange = pco.material.elevationRange;
+        const range: [number, number] = [-2, 1.2];
+        this.materialTransparent.elevationRange = range;
+        this.materialOpaque.elevationRange = range;
+        return pco;
+      });
   }
 
   add(pco: PointCloudOctree, group: Group): void {
@@ -211,6 +239,13 @@ export class Viewer {
     }
   }
 
+  updateMaterial(material: PointCloudMaterial): void {
+    //opacity: number, colorType: PointColorType): void {
+    for (const pc of this.pointClouds) {
+      pc.material = material;
+    }
+  }
+
   /**
    * The main loop of the viewer, called at 60FPS, if possible.
    */
@@ -227,9 +262,11 @@ export class Viewer {
     // camera control system.
     this.cameraControls.update();
 
+    this.updateMaterial(this.materialTransparent);
     this.update(time - prevTime, this.orthoCamera, this.renderer1);
     this.render1();
 
+    this.updateMaterial(this.materialOpaque);
     this.update(time - prevTime, this.camera, this.renderer2);
     this.render2();
 
