@@ -306,6 +306,7 @@ export class PointCloudMaterial extends RawShaderMaterial {
   @requiresShaderUpdate() useTextureBlending: boolean = false;
   @requiresShaderUpdate() usePointCloudMixing: boolean = false;
   @requiresShaderUpdate() highlightPoint: boolean = false;
+  @requiresShaderUpdate() grayscale: boolean = false;
 
   attributes = {
     position: { type: 'fv', value: [] },
@@ -466,6 +467,10 @@ export class PointCloudMaterial extends RawShaderMaterial {
 
     define('MAX_POINT_LIGHTS 0');
     define('MAX_DIR_LIGHTS 0');
+    
+    if (this.grayscale) {
+      define('grayscale');
+    }
 
     parts.push(shaderSrc);
 
