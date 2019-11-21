@@ -15,6 +15,10 @@ import {
   Vector3,
   Vector4,
   WebGLRenderer,
+  CustomBlending,
+  ReverseSubtractEquation,
+  SrcAlphaFactor,
+  OneFactor,
 } from 'three';
 import {
   DEFAULT_HIGHLIGHT_COLOR,
