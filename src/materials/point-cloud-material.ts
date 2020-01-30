@@ -93,6 +93,8 @@ export interface IPointCloudMaterialUniforms {
   toModel: IUniform<number[]>;
   transition: IUniform<number>;
   uColor: IUniform<Color>;
+  verticalRange1: IUniform<[number, number]>;
+  verticalRange2: IUniform<[number, number]>;
   visibleNodes: IUniform<Texture>;
   vnStart: IUniform<number>;
   wClassification: IUniform<number>;
@@ -227,8 +229,9 @@ export class PointCloudMaterial extends RawShaderMaterial {
     toModel: makeUniform('Matrix4f', []),
     transition: makeUniform('f', 0.5),
     uColor: makeUniform('c', new Color(0xffffff)),
-    // @ts-ignore
-    visibleNodes: makeUniform('t', this.visibleNodesTexture || new Texture()),
+    verticalRange1: makeUniform('fv', [0.0, 1.0] as [number, number]),
+    verticalRange2: makeUniform('fv', [-0.5, 1.2] as [number, number]),
+    visibleNodes: makeUniform('t', new Texture()),
     vnStart: makeUniform('f', 0.0),
     wClassification: makeUniform('f', 0),
     wElevation: makeUniform('f', 0),
@@ -297,6 +300,8 @@ export class PointCloudMaterial extends RawShaderMaterial {
   @uniform('stripeDivisorX') stripeDivisorX!: number;
   @uniform('stripeDivisorY') stripeDivisorY!: number;
   @uniform('pointCloudMixAngle') pointCloudMixAngle!: number;
+  @uniform('verticalRange1') verticalRange1!: [number, number];
+  @uniform('verticalRange2') verticalRange2!: [number, number];
 
   @requiresShaderUpdate() useClipBox: boolean = false;
   @requiresShaderUpdate() weighted: boolean = false;
@@ -312,6 +317,7 @@ export class PointCloudMaterial extends RawShaderMaterial {
   @requiresShaderUpdate() usePointCloudMixing: boolean = false;
   @requiresShaderUpdate() highlightPoint: boolean = false;
   @requiresShaderUpdate() grayscale: boolean = false;
+  @requiresShaderUpdate() dualVerticalRangeHighlight: boolean = false;
 
   attributes = {
     position: { type: 'fv', value: [] },
@@ -328,10 +334,10 @@ export class PointCloudMaterial extends RawShaderMaterial {
   constructor(parameters: Partial<IPointCloudMaterialParameters> = {}) {
     super();
 
-    const tex = (this.visibleNodesTexture = generateDataTexture(2048, 1, new Color(0xffffff)));
-    tex.minFilter = NearestFilter;
-    tex.magFilter = NearestFilter;
-    this.setUniform('visibleNodes', tex);
+    this.visibleNodesTexture = generateDataTexture(2048, 1, new Color(0xffffff));
+    this.visibleNodesTexture.minFilter = NearestFilter;
+    this.visibleNodesTexture.magFilter = NearestFilter;
+    this.setUniform('visibleNodes', this.visibleNodesTexture);
 
     this.treeType = getValid(parameters.treeType, TreeType.OCTREE);
     this.size = getValid(parameters.size, 1.0);
@@ -482,6 +488,10 @@ export class PointCloudMaterial extends RawShaderMaterial {
     
     if (this.grayscale) {
       define('grayscale');
+    }
+
+    if (this.dualVerticalRangeHighlight) {
+      define('dual_vertical_range_highlight');
     }
 
     parts.push(shaderSrc);
