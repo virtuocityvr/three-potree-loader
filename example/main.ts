@@ -20,6 +20,8 @@ interface PointCloudsConfig {
   url: string;
   version: 'v1' | 'v2';
 }
+// let pointCloud: PointCloudOctree | undefined;
+// let loaded: boolean = false;
 
 const examplePointClouds: PointCloudsConfig[] = [
   {
