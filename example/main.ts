@@ -1,5 +1,5 @@
 import { Vector3 } from 'three';
-import { PointCloudOctree } from '../src';
+import { ClipMode, PointCloudOctree } from '../src';
 import { Viewer } from './viewer';
 
 require('./main.css');
@@ -23,6 +23,7 @@ unloadBtn.addEventListener('click', () => {
 
   viewer.unload();
   loaded = false;
+  pointCloud = undefined;
 });
 
 const loadBtn = document.createElement('button');
@@ -44,6 +45,9 @@ loadBtn.addEventListener('click', () => {
       pointCloud.rotateX(-Math.PI / 2);
       pointCloud.material.size = 1.0;
 
+      pointCloud.material.clipMode = ClipMode.CLIP_HORIZONTALLY;
+      pointCloud.material.clipExtent = [0.0, 0.0, 0.5, 1.0];
+
       const camera = viewer.camera;
       camera.far = 1000;
       camera.updateProjectionMatrix();
@@ -55,8 +59,24 @@ loadBtn.addEventListener('click', () => {
     .catch(err => console.error(err));
 });
 
+const slider = document.createElement('input');
+slider.type = 'range';
+slider.min = String(10_000);
+slider.max = String(500_000);
+slider.className = 'budget-slider';
+
+slider.addEventListener('change', () => {
+  if (!pointCloud) {
+    return;
+  }
+
+  pointCloud.potree.pointBudget = parseInt(slider.value, 10);
+  console.log(pointCloud.potree.pointBudget);
+});
+
 const btnContainer = document.createElement('div');
 btnContainer.className = 'btn-container';
 document.body.appendChild(btnContainer);
 btnContainer.appendChild(unloadBtn);
 btnContainer.appendChild(loadBtn);
+btnContainer.appendChild(slider);

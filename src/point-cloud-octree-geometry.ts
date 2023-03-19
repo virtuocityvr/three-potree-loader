@@ -22,7 +22,7 @@ export class PointCloudOctreeGeometry {
     public boundingBox: Box3,
     public tightBoundingBox: Box3,
     public offset: Vector3,
-    public xhrRequest: XhrRequest
+    public xhrRequest: XhrRequest,
   ) {}
 
   dispose(): void {
@@ -30,5 +30,13 @@ export class PointCloudOctreeGeometry {
     this.root.traverse(node => node.dispose());
 
     this.disposed = true;
+  }
+
+  addNodeLoadedCallback(callback: (node: PointCloudOctreeGeometryNode) => void): void {
+    this.loader.callbacks.push(callback);
+  }
+
+  clearNodeLoadedCallbacks(): void {
+    this.loader.callbacks = [];
   }
 }

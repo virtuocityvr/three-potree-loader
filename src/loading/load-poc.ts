@@ -7,7 +7,7 @@ import { PointAttributes, PointAttributeStringName } from '../point-attributes';
 import { PointCloudOctreeGeometry } from '../point-cloud-octree-geometry';
 import { PointCloudOctreeGeometryNode } from '../point-cloud-octree-geometry-node';
 import { createChildAABB } from '../utils/bounds';
-import { getIndexFromName } from '../utils/utils';
+import { getIndexFromName, handleFailedRequest } from '../utils/utils';
 import { Version } from '../version';
 import { BinaryLoader } from './binary-loader';
 import { GetUrlFn, XhrRequest } from './types';
@@ -42,15 +42,20 @@ interface POCJson {
  * @param getUrl
  *    Function which receives the relative URL of a point cloud chunk file which is to be loaded
  *    and shoud return a new url (e.g. signed) in the form of a string or a promise.
- *
+ * @param xhrRequest An arrow function for a fetch request
  * @returns
  *    An observable which emits once when the first LOD of the point cloud is loaded.
  */
-export function loadPOC(url: string, getUrl: GetUrlFn, xhrRequest = fetch): Promise<PointCloudOctreeGeometry> {
+export function loadPOC(
+  url: string,
+  getUrl: GetUrlFn,
+  xhrRequest: XhrRequest,
+): Promise<PointCloudOctreeGeometry> {
   return Promise.resolve(getUrl(url)).then(transformedUrl => {
     return xhrRequest(transformedUrl, { mode: 'cors' })
-        .then(res => res.json())
-        .then(parse(transformedUrl, getUrl, xhrRequest));
+      .then(res => handleFailedRequest(res))
+      .then(okRes => okRes.json())
+      .then(parse(transformedUrl, getUrl, xhrRequest));
   });
 }
 
@@ -63,13 +68,19 @@ function parse(url: string, getUrl: GetUrlFn, xhrRequest: XhrRequest) {
       version: data.version,
       boundingBox,
       scale: data.scale,
-      xhrRequest
+      xhrRequest,
     });
 
-    const pco = new PointCloudOctreeGeometry(loader, boundingBox, tightBoundingBox, offset, xhrRequest);
+    const pco = new PointCloudOctreeGeometry(
+      loader,
+      boundingBox,
+      tightBoundingBox,
+      offset,
+      xhrRequest,
+    );
 
-    pco.octreeDir = data.octreeDir.indexOf('http') === 0 ? data.octreeDir : `${url}/../${data.octreeDir}`;
     pco.url = url;
+    pco.octreeDir = data.octreeDir;
     pco.needsUpdate = true;
     pco.spacing = data.spacing;
     pco.hierarchyStepSize = data.hierarchyStepSize;
@@ -82,19 +93,23 @@ function parse(url: string, getUrl: GetUrlFn, xhrRequest: XhrRequest) {
     const version = new Version(data.version);
 
     return loadRoot(pco, data, nodes, version).then(() => {
+      if (version.upTo('1.4')) {
+        loadRemainingHierarchy(pco, data, nodes);
+      }
 
-        if (version.upTo('1.4'))
-            loadRemainingHierarchy(pco, data, nodes);
-
-        pco.nodes = nodes;
-        return pco;
+      pco.nodes = nodes;
+      return pco;
     });
   };
 }
 
 function getBoundingBoxes(
   data: POCJson,
-): { offset: Vector3; boundingBox: Box3; tightBoundingBox: Box3 } {
+): {
+  offset: Vector3;
+  boundingBox: Box3;
+  tightBoundingBox: Box3;
+} {
   const min = new Vector3(data.boundingBox.lx, data.boundingBox.ly, data.boundingBox.lz);
   const max = new Vector3(data.boundingBox.ux, data.boundingBox.uy, data.boundingBox.uz);
   const boundingBox = new Box3(min, max);

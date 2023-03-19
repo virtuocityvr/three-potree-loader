@@ -15,6 +15,11 @@ export enum TreeType {
   KDTREE = 1,
 }
 
+export enum PointOpacityType {
+  FIXED = 0,
+  ATTENUATED = 1,
+}
+
 export enum PointColorType {
   RGB = 0,
   COLOR = 1,
@@ -33,4 +38,15 @@ export enum PointColorType {
   PHONG = 12,
   RGB_HEIGHT = 13,
   COMPOSITE = 50,
+}
+
+export enum NormalFilteringMode {
+  ABSOLUTE_NORMAL_FILTERING_MODE = 1,
+  LESS_EQUAL_NORMAL_FILTERING_MODE = 2,
+  GREATER_NORMAL_FILTERING_MODE = 3,
+}
+
+export enum PointCloudMixingMode {
+  CHECKBOARD = 1,
+  STRIPES = 2,
 }

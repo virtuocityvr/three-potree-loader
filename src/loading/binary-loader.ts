@@ -3,8 +3,10 @@
 // -------------------------------------------------------------------------------------------------
 
 import { Box3, BufferAttribute, BufferGeometry, Uint8BufferAttribute, Vector3 } from 'three';
+import { handleFailedRequest, handleEmptyBuffer } from '../utils/utils';
 import { PointAttributeName, PointAttributeType } from '../point-attributes';
 import { PointCloudOctreeGeometryNode } from '../point-cloud-octree-geometry-node';
+import { WorkerPool } from '../utils/worker-pool';
 import { Version } from '../version';
 import { GetUrlFn, XhrRequest } from './types';
 
@@ -35,6 +37,8 @@ interface BinaryLoaderOptions {
   xhrRequest: XhrRequest;
 }
 
+type Callback = (node: PointCloudOctreeGeometryNode) => void;
+
 export class BinaryLoader {
   version: Version;
   boundingBox: Box3;
@@ -42,15 +46,19 @@ export class BinaryLoader {
   getUrl: GetUrlFn;
   disposed: boolean = false;
   xhrRequest: XhrRequest;
+  callbacks: Callback[];
 
-  private workers: Worker[] = [];
+  public static readonly WORKER_POOL = new WorkerPool(
+    32,
+    require('../workers/binary-decoder.worker.js'),
+  );
 
   constructor({
     getUrl = s => Promise.resolve(s),
     version,
     boundingBox,
     scale,
-    xhrRequest
+    xhrRequest,
   }: BinaryLoaderOptions) {
     if (typeof version === 'string') {
       this.version = new Version(version);
@@ -62,12 +70,10 @@ export class BinaryLoader {
     this.getUrl = getUrl;
     this.boundingBox = boundingBox;
     this.scale = scale;
+    this.callbacks = [];
   }
 
   dispose(): void {
-    this.workers.forEach(worker => worker.terminate());
-    this.workers = [];
-
     this.disposed = true;
   }
 
@@ -78,8 +84,12 @@ export class BinaryLoader {
 
     return Promise.resolve(this.getUrl(this.getNodeUrl(node)))
       .then(url => this.xhrRequest(url, { mode: 'cors' }))
-      .then(res => res.arrayBuffer())
-      .then(buffer => this.parse(node, buffer));
+      .then(res => handleFailedRequest(res))
+      .then(okRes => okRes.arrayBuffer())
+      .then(buffer => handleEmptyBuffer(buffer))
+      .then(okBuffer => {
+        return new Promise(resolve => this.parse(node, okBuffer, resolve));
+      });
   }
 
   private getNodeUrl(node: PointCloudOctreeGeometryNode): string {
@@ -91,70 +101,66 @@ export class BinaryLoader {
     return url;
   }
 
-  private parse(node: PointCloudOctreeGeometryNode, buffer: ArrayBuffer): void {
+  private parse(
+    node: PointCloudOctreeGeometryNode,
+    buffer: ArrayBuffer,
+    resolve: () => void,
+  ): void {
     if (this.disposed) {
+      resolve();
       return;
     }
 
-    const worker = this.getWorker();
+    BinaryLoader.WORKER_POOL.getWorker().then(autoTerminatingWorker => {
+      const pointAttributes = node.pcoGeometry.pointAttributes;
+      const numPoints = buffer.byteLength / pointAttributes.byteSize;
 
-    const pointAttributes = node.pcoGeometry.pointAttributes;
-    const numPoints = buffer.byteLength / pointAttributes.byteSize;
-
-    if (this.version.upTo('1.5')) {
-      node.numPoints = numPoints;
-    }
-
-    worker.onmessage = (e: WorkerResponse) => {
-      if (this.disposed) {
-        return;
+      if (this.version.upTo('1.5')) {
+        node.numPoints = numPoints;
       }
 
-      const data = e.data;
+      autoTerminatingWorker.worker.onmessage = (e: WorkerResponse) => {
+        if (this.disposed) {
+          resolve();
+          BinaryLoader.WORKER_POOL.releaseWorker(autoTerminatingWorker);
+          return;
+        }
 
-      const geometry = (node.geometry = node.geometry || new BufferGeometry());
-      geometry.boundingBox = node.boundingBox;
+        const data = e.data;
 
-      this.addBufferAttributes(geometry, data.attributeBuffers);
-      this.addIndices(geometry, data.indices);
-      this.addNormalAttribute(geometry, numPoints);
+        const geometry = (node.geometry = node.geometry || new BufferGeometry());
+        geometry.boundingBox = node.boundingBox;
 
-      node.mean = new Vector3().fromArray(data.mean);
-      node.tightBoundingBox = this.getTightBoundingBox(data.tightBoundingBox);
-      node.loaded = true;
-      node.loading = false;
-      node.pcoGeometry.numNodesLoading--;
-      node.pcoGeometry.needsUpdate = true;
+        this.addBufferAttributes(geometry, data.attributeBuffers);
+        this.addIndices(geometry, data.indices);
+        this.addNormalAttribute(geometry, numPoints);
 
-      this.releaseWorker(worker);
-    };
+        node.mean = new Vector3().fromArray(data.mean);
+        node.tightBoundingBox = this.getTightBoundingBox(data.tightBoundingBox);
+        node.loaded = true;
+        node.loading = false;
+        node.failed = false;
+        node.pcoGeometry.numNodesLoading--;
+        node.pcoGeometry.needsUpdate = true;
 
-    const message = {
-      buffer,
-      pointAttributes,
-      version: this.version.version,
-      min: node.boundingBox.min.toArray(),
-      offset: node.pcoGeometry.offset.toArray(),
-      scale: this.scale,
-      spacing: node.spacing,
-      hasChildren: node.hasChildren,
-    };
+        this.callbacks.forEach(callback => callback(node));
+        resolve();
+        BinaryLoader.WORKER_POOL.releaseWorker(autoTerminatingWorker);
+      };
 
-    worker.postMessage(message, [message.buffer]);
-  }
+      const message = {
+        buffer,
+        pointAttributes,
+        version: this.version.version,
+        min: node.boundingBox.min.toArray(),
+        offset: node.pcoGeometry.offset.toArray(),
+        scale: this.scale,
+        spacing: node.spacing,
+        hasChildren: node.hasChildren,
+      };
 
-  private getWorker(): Worker {
-    let worker = this.workers.pop();
-    if (worker) {
-      return worker;
-    }
-
-    const ctor = require('worker-loader?inline!../workers/binary-decoder-worker.js');
-    return new ctor();
-  }
-
-  private releaseWorker(worker: Worker): void {
-    this.workers.push(worker);
+      autoTerminatingWorker.worker.postMessage(message, [message.buffer]);
+    });
   }
 
   private getTightBoundingBox({ min, max }: { min: number[]; max: number[] }): Box3 {
@@ -173,19 +179,19 @@ export class BinaryLoader {
       const buffer = buffers[property].buffer;
 
       if (this.isAttribute(property, PointAttributeName.POSITION_CARTESIAN)) {
-        geometry.addAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
       } else if (this.isAttribute(property, PointAttributeName.COLOR_PACKED)) {
-        geometry.addAttribute('color', new BufferAttribute(new Uint8Array(buffer), 3, true));
+        geometry.setAttribute('color', new BufferAttribute(new Uint8Array(buffer), 3, true));
       } else if (this.isAttribute(property, PointAttributeName.INTENSITY)) {
-        geometry.addAttribute('intensity', new BufferAttribute(new Float32Array(buffer), 1));
+        geometry.setAttribute('intensity', new BufferAttribute(new Float32Array(buffer), 1));
       } else if (this.isAttribute(property, PointAttributeName.CLASSIFICATION)) {
-        geometry.addAttribute('classification', new BufferAttribute(new Uint8Array(buffer), 1));
+        geometry.setAttribute('classification', new BufferAttribute(new Uint8Array(buffer), 1));
       } else if (this.isAttribute(property, PointAttributeName.NORMAL_SPHEREMAPPED)) {
-        geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
       } else if (this.isAttribute(property, PointAttributeName.NORMAL_OCT16)) {
-        geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
       } else if (this.isAttribute(property, PointAttributeName.NORMAL)) {
-        geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
       }
     });
   }
@@ -193,13 +199,13 @@ export class BinaryLoader {
   private addIndices(geometry: BufferGeometry, indices: ArrayBuffer): void {
     const indicesAttribute = new Uint8BufferAttribute(indices, 4);
     indicesAttribute.normalized = true;
-    geometry.addAttribute('indices', indicesAttribute);
+    geometry.setAttribute('indices', indicesAttribute);
   }
 
   private addNormalAttribute(geometry: BufferGeometry, numPoints: number): void {
     if (!geometry.getAttribute('normal')) {
       const buffer = new Float32Array(numPoints * 3);
-      geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+      geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
     }
   }
 

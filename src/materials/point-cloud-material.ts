@@ -1,24 +1,45 @@
 import {
   AdditiveBlending,
-  AlwaysDepth,
+  BufferGeometry,
+  Camera,
   Color,
+  LessEqualDepth,
+  Material,
   NearestFilter,
   NoBlending,
+  PerspectiveCamera,
   RawShaderMaterial,
+  Scene,
   Texture,
-  VertexColors,
+  Vector2,
+  Vector3,
+  Vector4,
+  WebGLRenderer,
 } from 'three';
 import {
+  DEFAULT_HIGHLIGHT_COLOR,
   DEFAULT_MAX_POINT_SIZE,
   DEFAULT_MIN_POINT_SIZE,
   DEFAULT_RGB_BRIGHTNESS,
   DEFAULT_RGB_CONTRAST,
   DEFAULT_RGB_GAMMA,
+  PERSPECTIVE_CAMERA,
 } from '../constants';
+import { PointCloudOctree } from '../point-cloud-octree';
+import { PointCloudOctreeNode } from '../point-cloud-octree-node';
+import { byLevelAndIndex } from '../utils/utils';
 import { DEFAULT_CLASSIFICATION } from './classification';
 import { ClipMode, IClipBox } from './clipping';
-import { PointColorType, PointShape, PointSizeType, TreeType } from './enums';
-import { SPECTRAL } from './gradients/spectral';
+import {
+  NormalFilteringMode,
+  PointCloudMixingMode,
+  PointColorType,
+  PointOpacityType,
+  PointShape,
+  PointSizeType,
+  TreeType,
+} from './enums';
+import { SPECTRAL } from './gradients';
 import {
   generateClassificationTexture,
   generateDataTexture,
@@ -40,9 +61,9 @@ export interface IPointCloudMaterialUniforms {
   classificationLUT: IUniform<Texture>;
   clipBoxCount: IUniform<number>;
   clipBoxes: IUniform<Float32Array>;
+  clipExtent: IUniform<[number, number, number, number]>;
   depthMap: IUniform<Texture | null>;
   diffuse: IUniform<[number, number, number]>;
-  far: IUniform<number>;
   fov: IUniform<number>;
   gradient: IUniform<Texture>;
   heightMax: IUniform<number>;
@@ -54,7 +75,6 @@ export interface IPointCloudMaterialUniforms {
   level: IUniform<number>;
   maxSize: IUniform<number>;
   minSize: IUniform<number>;
-  near: IUniform<number>;
   octreeSize: IUniform<number>;
   opacity: IUniform<number>;
   pcIndex: IUniform<number>;
@@ -76,6 +96,21 @@ export interface IPointCloudMaterialUniforms {
   wReturnNumber: IUniform<number>;
   wRGB: IUniform<number>;
   wSourceID: IUniform<number>;
+  opacityAttenuation: IUniform<number>;
+  filterByNormalThreshold: IUniform<number>;
+  highlightedPointCoordinate: IUniform<Vector3>;
+  highlightedPointColor: IUniform<Vector4>;
+  enablePointHighlighting: IUniform<boolean>;
+  highlightedPointScale: IUniform<number>;
+  normalFilteringMode: IUniform<number>;
+  backgroundMap: IUniform<Texture | null>;
+  pointCloudID: IUniform<number>;
+  pointCloudMixAngle: IUniform<number>;
+  stripeDistanceX: IUniform<number>;
+  stripeDistanceY: IUniform<number>;
+  stripeDivisorX: IUniform<number>;
+  stripeDivisorY: IUniform<number>;
+  pointCloudMixingMode: IUniform<number>;
 }
 
 const TREE_TYPE_DEFS = {
@@ -87,6 +122,11 @@ const SIZE_TYPE_DEFS = {
   [PointSizeType.FIXED]: 'fixed_point_size',
   [PointSizeType.ATTENUATED]: 'attenuated_point_size',
   [PointSizeType.ADAPTIVE]: 'adaptive_point_size',
+};
+
+const OPACITY_DEFS = {
+  [PointOpacityType.ATTENUATED]: 'attenuated_opacity',
+  [PointOpacityType.FIXED]: 'fixed_opacity',
 };
 
 const SHAPE_DEFS = {
@@ -117,33 +157,46 @@ const CLIP_MODE_DEFS = {
   [ClipMode.DISABLED]: 'clip_disabled',
   [ClipMode.CLIP_OUTSIDE]: 'clip_outside',
   [ClipMode.HIGHLIGHT_INSIDE]: 'clip_highlight_inside',
+  [ClipMode.CLIP_HORIZONTALLY]: 'clip_horizontally',
+  [ClipMode.CLIP_VERTICALLY]: 'clip_vertically',
 };
 
 export class PointCloudMaterial extends RawShaderMaterial {
+  private static helperVec3 = new Vector3();
+  private static helperVec2 = new Vector2();
+
+  /**
+   * Use the drawing buffer size instead of the dom client width and height when passing the screen height and screen width uniforms to the
+   * shader. This is useful if you have offscreen canvases (which in some browsers return 0 as client width and client height).
+   */
+  useDrawingBufferSize = false;
   lights = false;
   fog = false;
   numClipBoxes: number = 0;
   clipBoxes: IClipBox[] = [];
-  readonly visibleNodesTexture: Texture;
+  visibleNodesTexture: Texture | undefined;
+  private visibleNodeTextureOffsets = new Map<string, number>();
 
   private _gradient = SPECTRAL;
-  private gradientTexture = generateGradientTexture(this._gradient);
+  private gradientTexture: Texture | undefined = generateGradientTexture(this._gradient);
 
   private _classification: IClassification = DEFAULT_CLASSIFICATION;
-  private classificationTexture: Texture = generateClassificationTexture(this._classification);
+  private classificationTexture: Texture | undefined = generateClassificationTexture(
+    this._classification,
+  );
 
   uniforms: IPointCloudMaterialUniforms & Record<string, IUniform<any>> = {
     bbSize: makeUniform('fv', [0, 0, 0] as [number, number, number]),
     blendDepthSupplement: makeUniform('f', 0.0),
     blendHardness: makeUniform('f', 2.0),
-    classificationLUT: makeUniform('t', this.classificationTexture),
+    classificationLUT: makeUniform('t', this.classificationTexture || new Texture()),
     clipBoxCount: makeUniform('f', 0),
     clipBoxes: makeUniform('Matrix4fv', [] as any),
+    clipExtent: makeUniform('fv', [0.0, 0.0, 1.0, 1.0] as [number, number, number, number]),
     depthMap: makeUniform('t', null),
     diffuse: makeUniform('fv', [1, 1, 1] as [number, number, number]),
-    far: makeUniform('f', 1.0),
     fov: makeUniform('f', 1.0),
-    gradient: makeUniform('t', this.gradientTexture),
+    gradient: makeUniform('t', this.gradientTexture || new Texture()),
     heightMax: makeUniform('f', 1.0),
     heightMin: makeUniform('f', 0.0),
     intensityBrightness: makeUniform('f', 0),
@@ -154,7 +207,6 @@ export class PointCloudMaterial extends RawShaderMaterial {
     level: makeUniform('f', 0.0),
     maxSize: makeUniform('f', DEFAULT_MAX_POINT_SIZE),
     minSize: makeUniform('f', DEFAULT_MIN_POINT_SIZE),
-    near: makeUniform('f', 0.1),
     octreeSize: makeUniform('f', 0),
     opacity: makeUniform('f', 1.0),
     pcIndex: makeUniform('f', 0),
@@ -168,7 +220,8 @@ export class PointCloudMaterial extends RawShaderMaterial {
     toModel: makeUniform('Matrix4f', []),
     transition: makeUniform('f', 0.5),
     uColor: makeUniform('c', new Color(0xffffff)),
-    visibleNodes: makeUniform('t', this.visibleNodesTexture),
+    // @ts-ignore
+    visibleNodes: makeUniform('t', this.visibleNodesTexture || new Texture()),
     vnStart: makeUniform('f', 0.0),
     wClassification: makeUniform('f', 0),
     wElevation: makeUniform('f', 0),
@@ -176,46 +229,81 @@ export class PointCloudMaterial extends RawShaderMaterial {
     wReturnNumber: makeUniform('f', 0),
     wRGB: makeUniform('f', 1),
     wSourceID: makeUniform('f', 0),
+    opacityAttenuation: makeUniform('f', 1),
+    filterByNormalThreshold: makeUniform('f', 0),
+    highlightedPointCoordinate: makeUniform('fv', new Vector3()),
+    highlightedPointColor: makeUniform('fv', DEFAULT_HIGHLIGHT_COLOR.clone()),
+    enablePointHighlighting: makeUniform('b', true),
+    highlightedPointScale: makeUniform('f', 2.0),
+    backgroundMap: makeUniform('t', null),
+    normalFilteringMode: makeUniform('i', NormalFilteringMode.ABSOLUTE_NORMAL_FILTERING_MODE),
+    pointCloudID: makeUniform('f', 2),
+    pointCloudMixingMode: makeUniform('i', PointCloudMixingMode.CHECKBOARD),
+    stripeDistanceX: makeUniform('f', 5),
+    stripeDistanceY: makeUniform('f', 5),
+    stripeDivisorX: makeUniform('f', 2),
+    stripeDivisorY: makeUniform('f', 2),
+    pointCloudMixAngle: makeUniform('f', 31),
   };
 
-  @uniform('bbSize', true) bbSize!: [number, number, number]; // prettier-ignore
-  @uniform('depthMap', true) depthMap!: Texture | null; // prettier-ignore
-  @uniform('far') far!: number; // prettier-ignore
-  @uniform('fov') fov!: number; // prettier-ignore
-  @uniform('heightMax') heightMax!: number; // prettier-ignore
-  @uniform('heightMin') heightMin!: number; // prettier-ignore
-  @uniform('intensityBrightness') intensityBrightness!: number; // prettier-ignore
-  @uniform('intensityContrast') intensityContrast!: number; // prettier-ignore
-  @uniform('intensityGamma') intensityGamma!: number; // prettier-ignore
-  @uniform('intensityRange') intensityRange!: [number, number]; // prettier-ignore
-  @uniform('maxSize') maxSize!: number; // prettier-ignore
-  @uniform('minSize') minSize!: number; // prettier-ignore
-  @uniform('near') near!: number; // prettier-ignore
-  @uniform('opacity', true) opacity!: number; // prettier-ignore
-  @uniform('rgbBrightness', true) rgbBrightness!: number; // prettier-ignore
-  @uniform('rgbContrast', true) rgbContrast!: number; // prettier-ignore
-  @uniform('rgbGamma', true) rgbGamma!: number; // prettier-ignore
-  @uniform('screenHeight') screenHeight!: number; // prettier-ignore
-  @uniform('screenWidth') screenWidth!: number; // prettier-ignore
-  @uniform('size', true) size!: number; // prettier-ignore
-  @uniform('spacing') spacing!: number; // prettier-ignore
-  @uniform('transition') transition!: number; // prettier-ignore
-  @uniform('uColor', true) color!: Color; // prettier-ignore
-  @uniform('wClassification') weightClassification!: number; // prettier-ignore
-  @uniform('wElevation') weightElevation!: number; // prettier-ignore
-  @uniform('wIntensity') weightIntensity!: number; // prettier-ignore
-  @uniform('wReturnNumber') weightReturnNumber!: number; // prettier-ignore
-  @uniform('wRGB') weightRGB!: number; // prettier-ignore
-  @uniform('wSourceID') weightSourceID!: number; // prettier-ignore
+  @uniform('bbSize') bbSize!: [number, number, number];
+  @uniform('clipExtent') clipExtent!: [number, number, number, number];
+  @uniform('depthMap') depthMap!: Texture | undefined;
+  @uniform('fov') fov!: number;
+  @uniform('heightMax') heightMax!: number;
+  @uniform('heightMin') heightMin!: number;
+  @uniform('intensityBrightness') intensityBrightness!: number;
+  @uniform('intensityContrast') intensityContrast!: number;
+  @uniform('intensityGamma') intensityGamma!: number;
+  @uniform('intensityRange') intensityRange!: [number, number];
+  @uniform('maxSize') maxSize!: number;
+  @uniform('minSize') minSize!: number;
+  @uniform('octreeSize') octreeSize!: number;
+  @uniform('opacity', true) opacity!: number;
+  @uniform('rgbBrightness', true) rgbBrightness!: number;
+  @uniform('rgbContrast', true) rgbContrast!: number;
+  @uniform('rgbGamma', true) rgbGamma!: number;
+  @uniform('screenHeight') screenHeight!: number;
+  @uniform('screenWidth') screenWidth!: number;
+  @uniform('size') size!: number;
+  @uniform('spacing') spacing!: number;
+  @uniform('transition') transition!: number;
+  @uniform('uColor') color!: Color;
+  @uniform('wClassification') weightClassification!: number;
+  @uniform('wElevation') weightElevation!: number;
+  @uniform('wIntensity') weightIntensity!: number;
+  @uniform('wReturnNumber') weightReturnNumber!: number;
+  @uniform('wRGB') weightRGB!: number;
+  @uniform('wSourceID') weightSourceID!: number;
+  @uniform('opacityAttenuation') opacityAttenuation!: number;
+  @uniform('filterByNormalThreshold') filterByNormalThreshold!: number;
+  @uniform('highlightedPointCoordinate') highlightedPointCoordinate!: Vector3;
+  @uniform('highlightedPointColor') highlightedPointColor!: Vector4;
+  @uniform('enablePointHighlighting') enablePointHighlighting!: boolean;
+  @uniform('highlightedPointScale') highlightedPointScale!: number;
+  @uniform('normalFilteringMode') normalFilteringMode!: number;
+  @uniform('backgroundMap') backgroundMap!: Texture | undefined;
+  @uniform('pointCloudID') pointCloudID!: number;
+  @uniform('pointCloudMixingMode') pointCloudMixingMode!: number;
+  @uniform('stripeDistanceX') stripeDistanceX!: number;
+  @uniform('stripeDistanceY') stripeDistanceY!: number;
+  @uniform('stripeDivisorX') stripeDivisorX!: number;
+  @uniform('stripeDivisorY') stripeDivisorY!: number;
+  @uniform('pointCloudMixAngle') pointCloudMixAngle!: number;
 
-  @requiresShaderUpdate() useClipBox: boolean = false; // prettier-ignore
-  @requiresShaderUpdate() weighted: boolean = false; // prettier-ignore
-  @requiresShaderUpdate() pointColorType: PointColorType = PointColorType.RGB; // prettier-ignore
-  @requiresShaderUpdate() pointSizeType: PointSizeType = PointSizeType.ADAPTIVE; // prettier-ignore
-  @requiresShaderUpdate() clipMode: ClipMode = ClipMode.DISABLED; // prettier-ignore
-  @requiresShaderUpdate() useEDL: boolean = false; // prettier-ignore
-  @requiresShaderUpdate() shape: PointShape = PointShape.SQUARE; // prettier-ignore
-  @requiresShaderUpdate() treeType: TreeType = TreeType.OCTREE; // prettier-ignore
+  @requiresShaderUpdate() useClipBox: boolean = false;
+  @requiresShaderUpdate() weighted: boolean = false;
+  @requiresShaderUpdate() pointColorType: PointColorType = PointColorType.RGB;
+  @requiresShaderUpdate() pointSizeType: PointSizeType = PointSizeType.ADAPTIVE;
+  @requiresShaderUpdate() clipMode: ClipMode = ClipMode.DISABLED;
+  @requiresShaderUpdate() useEDL: boolean = false;
+  @requiresShaderUpdate() shape: PointShape = PointShape.SQUARE;
+  @requiresShaderUpdate() treeType: TreeType = TreeType.OCTREE;
+  @requiresShaderUpdate() pointOpacityType: PointOpacityType = PointOpacityType.FIXED;
+  @requiresShaderUpdate() useFilterByNormal: boolean = false;
+  @requiresShaderUpdate() useTextureBlending: boolean = false;
+  @requiresShaderUpdate() usePointCloudMixing: boolean = false;
+  @requiresShaderUpdate() highlightPoint: boolean = false;
 
   attributes = {
     position: { type: 'fv', value: [] },
@@ -248,26 +336,60 @@ export class PointCloudMaterial extends RawShaderMaterial {
     this.defaultAttributeValues.classification = [0, 0, 0];
     this.defaultAttributeValues.indices = [0, 0, 0, 0];
 
-    this.vertexColors = VertexColors;
+    this.vertexColors = true;
 
     this.updateShaderSource();
   }
 
-  updateShaderSource() {
-    this.vertexShader = this.applyDefines(require('./shaders/pointcloud.vert'));
-    this.fragmentShader = this.applyDefines(require('./shaders/pointcloud.frag'));
+  dispose(): void {
+    super.dispose();
+
+    if (this.gradientTexture) {
+      this.gradientTexture.dispose();
+      this.gradientTexture = undefined;
+    }
+
+    if (this.visibleNodesTexture) {
+      this.visibleNodesTexture.dispose();
+      this.visibleNodesTexture = undefined;
+    }
+
+    this.clearVisibleNodeTextureOffsets();
+
+    if (this.classificationTexture) {
+      this.classificationTexture.dispose();
+      this.classificationTexture = undefined;
+    }
+
+    if (this.depthMap) {
+      this.depthMap.dispose();
+      this.depthMap = undefined;
+    }
+    if (this.backgroundMap) {
+      this.backgroundMap.dispose();
+      this.backgroundMap = undefined;
+    }
+  }
+
+  clearVisibleNodeTextureOffsets(): void {
+    this.visibleNodeTextureOffsets.clear();
+  }
+
+  updateShaderSource(): void {
+    this.vertexShader = this.applyDefines(require('./shaders/pointcloud.vert').default);
+    this.fragmentShader = this.applyDefines(require('./shaders/pointcloud.frag').default);
 
     if (this.opacity === 1.0) {
       this.blending = NoBlending;
       this.transparent = false;
       this.depthTest = true;
       this.depthWrite = true;
+      this.depthFunc = LessEqualDepth;
     } else if (this.opacity < 1.0 && !this.useEDL) {
       this.blending = AdditiveBlending;
       this.transparent = true;
       this.depthTest = false;
       this.depthWrite = true;
-      this.depthFunc = AlwaysDepth;
     }
 
     if (this.weighted) {
@@ -275,6 +397,7 @@ export class PointCloudMaterial extends RawShaderMaterial {
       this.transparent = true;
       this.depthTest = true;
       this.depthWrite = false;
+      this.depthFunc = LessEqualDepth;
     }
 
     this.needsUpdate = true;
@@ -283,8 +406,10 @@ export class PointCloudMaterial extends RawShaderMaterial {
   applyDefines(shaderSrc: string): string {
     const parts: string[] = [];
 
-    function define(value: string) {
-      parts.push(`#define ${value}`);
+    function define(value: string | undefined) {
+      if (value) {
+        parts.push(`#define ${value}`);
+      }
     }
 
     define(TREE_TYPE_DEFS[this.treeType]);
@@ -292,6 +417,7 @@ export class PointCloudMaterial extends RawShaderMaterial {
     define(SHAPE_DEFS[this.shape]);
     define(COLOR_DEFS[this.pointColorType]);
     define(CLIP_MODE_DEFS[this.clipMode]);
+    define(OPACITY_DEFS[this.pointOpacityType]);
 
     // We only perform gamma and brightness/contrast calculations per point if values are specified.
     if (
@@ -300,6 +426,10 @@ export class PointCloudMaterial extends RawShaderMaterial {
       this.rgbContrast !== DEFAULT_RGB_CONTRAST
     ) {
       define('use_rgb_gamma_contrast_brightness');
+    }
+
+    if (this.useFilterByNormal) {
+      define('use_filter_by_normal');
     }
 
     if (this.useEDL) {
@@ -314,9 +444,36 @@ export class PointCloudMaterial extends RawShaderMaterial {
       define('use_clip_box');
     }
 
+    if (this.highlightPoint) {
+      define('highlight_point');
+    }
+
+    if (this.useTextureBlending) {
+      define('use_texture_blending');
+    }
+
+    if (this.usePointCloudMixing) {
+      define('use_point_cloud_mixing');
+    }
+
+    define('MAX_POINT_LIGHTS 0');
+    define('MAX_DIR_LIGHTS 0');
+
     parts.push(shaderSrc);
 
     return parts.join('\n');
+  }
+
+  setPointCloudMixingMode(mode: PointCloudMixingMode) {
+    this.pointCloudMixingMode = mode;
+  }
+
+  getPointCloudMixingMode(): PointCloudMixingMode {
+    if (this.pointCloudMixingMode === PointCloudMixingMode.STRIPES) {
+      return PointCloudMixingMode.STRIPES;
+    }
+
+    return PointCloudMixingMode.CHECKBOARD;
   }
 
   setClipBoxes(clipBoxes: IClipBox[]): void {
@@ -424,11 +581,123 @@ export class PointCloudMaterial extends RawShaderMaterial {
 
     if (uObj.type === 'c') {
       (uObj.value as Color).copy(value as Color);
-      this.needsUpdate = true;
     } else if (value !== uObj.value) {
       uObj.value = value;
-      this.needsUpdate = true;
     }
+  }
+
+  updateMaterial(
+    octree: PointCloudOctree,
+    visibleNodes: PointCloudOctreeNode[],
+    camera: Camera,
+    renderer: WebGLRenderer,
+  ): void {
+    const pixelRatio = renderer.getPixelRatio();
+
+    if (camera.type === PERSPECTIVE_CAMERA) {
+      this.fov = (camera as PerspectiveCamera).fov * (Math.PI / 180);
+    } else {
+      this.fov = Math.PI / 2; // will result in slope = 1 in the shader
+    }
+    const renderTarget = renderer.getRenderTarget();
+    if (renderTarget !== null) {
+      this.screenWidth = renderTarget.width;
+      this.screenHeight = renderTarget.height;
+    } else {
+      this.screenWidth = renderer.domElement.clientWidth * pixelRatio;
+      this.screenHeight = renderer.domElement.clientHeight * pixelRatio;
+    }
+
+    if (this.useDrawingBufferSize) {
+      renderer.getDrawingBufferSize(PointCloudMaterial.helperVec2);
+      this.screenWidth = PointCloudMaterial.helperVec2.width;
+      this.screenHeight = PointCloudMaterial.helperVec2.height;
+    }
+
+    const maxScale = Math.max(octree.scale.x, octree.scale.y, octree.scale.z);
+    this.spacing = octree.pcoGeometry.spacing * maxScale;
+    this.octreeSize = octree.pcoGeometry.boundingBox.getSize(PointCloudMaterial.helperVec3).x;
+
+    if (
+      this.pointSizeType === PointSizeType.ADAPTIVE ||
+      this.pointColorType === PointColorType.LOD
+    ) {
+      this.updateVisibilityTextureData(visibleNodes);
+    }
+  }
+
+
+  private updateVisibilityTextureData(nodes: PointCloudOctreeNode[]) {
+    nodes.sort(byLevelAndIndex);
+
+    const data = new Uint8Array(nodes.length * 4);
+    const offsetsToChild = new Array(nodes.length).fill(Infinity);
+
+    this.visibleNodeTextureOffsets.clear();
+
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+
+      this.visibleNodeTextureOffsets.set(node.name, i);
+
+      if (i > 0) {
+        const parentName = node.name.slice(0, -1);
+        const parentOffset = this.visibleNodeTextureOffsets.get(parentName)!;
+        const parentOffsetToChild = i - parentOffset;
+
+        offsetsToChild[parentOffset] = Math.min(offsetsToChild[parentOffset], parentOffsetToChild);
+
+        // tslint:disable:no-bitwise
+        const offset = parentOffset * 4;
+        data[offset] = data[offset] | (1 << node.index);
+        data[offset + 1] = offsetsToChild[parentOffset] >> 8;
+        data[offset + 2] = offsetsToChild[parentOffset] % 256;
+        // tslint:enable:no-bitwise
+      }
+
+      data[i * 4 + 3] = node.name.length;
+    }
+
+    const texture = this.visibleNodesTexture;
+    if (texture) {
+      texture.image.data.set(data);
+      texture.needsUpdate = true;
+    }
+  }
+
+  static makeOnBeforeRender(
+    octree: PointCloudOctree,
+    node: PointCloudOctreeNode,
+    pcIndex?: number,
+  ) {
+    return (
+      _renderer: WebGLRenderer,
+      _scene: Scene,
+      _camera: Camera,
+      _geometry: BufferGeometry,
+      material: Material,
+    ) => {
+      const pointCloudMaterial = material as PointCloudMaterial;
+      const materialUniforms = pointCloudMaterial.uniforms;
+
+      materialUniforms.level.value = node.level;
+      materialUniforms.isLeafNode.value = node.isLeafNode;
+
+      const vnStart = pointCloudMaterial.visibleNodeTextureOffsets.get(node.name);
+      if (vnStart !== undefined) {
+        materialUniforms.vnStart.value = vnStart;
+      }
+
+      materialUniforms.pcIndex.value =
+        pcIndex !== undefined ? pcIndex : octree.visibleNodes.indexOf(node);
+
+      // Note: when changing uniforms in onBeforeRender, the flag uniformsNeedUpdate has to be
+      // set to true to instruct ThreeJS to upload them. See also
+      // https://github.com/mrdoob/three.js/issues/9870#issuecomment-368750182.
+
+      // Remove the cast to any after updating to Three.JS >= r113
+      (material as any) /*ShaderMaterial*/.uniformsNeedUpdate = true;
+    };
   }
 }
 
@@ -464,15 +733,15 @@ function uniform<K extends keyof IPointCloudMaterialUniforms>(
 
 function requiresShaderUpdate() {
   return (target: Object, propertyKey: string | symbol): void => {
-    let pValue: any;
+    const fieldName = `_${propertyKey.toString()}`;
 
     Object.defineProperty(target, propertyKey, {
       get() {
-        return pValue;
+        return this[fieldName];
       },
       set(value: any) {
-        if (value !== pValue) {
-          pValue = value;
+        if (value !== this[fieldName]) {
+          this[fieldName] = value;
           this.updateShaderSource();
         }
       },

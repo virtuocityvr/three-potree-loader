@@ -15,21 +15,65 @@ uniform float blendHardness;
 uniform float blendDepthSupplement;
 uniform float fov;
 uniform float spacing;
-uniform float near;
-uniform float far;
 uniform float pcIndex;
 uniform float screenWidth;
 uniform float screenHeight;
 
 uniform sampler2D depthMap;
 
-varying vec3	vColor;
-varying float	vOpacity;
-varying float	vLinearDepth;
-varying float	vLogDepth;
-varying vec3	vViewPosition;
-varying float	vRadius;
-varying vec3	vNormal;
+#if defined (clip_horizontally) || defined (clip_vertically)
+	uniform vec4 clipExtent;
+#endif
+
+#ifdef use_texture_blending
+	uniform sampler2D backgroundMap;
+#endif
+
+
+#ifdef use_point_cloud_mixing
+	uniform int pointCloudMixingMode;
+	uniform float pointCloudID;
+	uniform float pointCloudMixAngle;
+	uniform float stripeDistanceX;
+	uniform float stripeDistanceY;
+
+	uniform float stripeDivisorX;
+	uniform float stripeDivisorY;
+#endif
+
+#ifdef highlight_point
+	uniform vec4 highlightedPointColor;
+#endif
+
+varying vec3 vColor;
+
+#if !defined(color_type_point_index)
+	varying float vOpacity;
+#endif
+
+#if defined(weighted_splats)
+	varying float vLinearDepth;
+#endif
+
+#if !defined(paraboloid_point_shape) && defined(use_edl)
+	varying float vLogDepth;
+#endif
+
+#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0) || defined(paraboloid_point_shape)
+	varying vec3 vViewPosition;
+#endif
+
+#if defined(weighted_splats) || defined(paraboloid_point_shape)
+	varying float vRadius;
+#endif
+
+#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0)
+	varying vec3 vNormal;
+#endif
+
+#ifdef highlight_point
+	varying float vHighlight;
+#endif
 
 float specularStrength = 1.0;
 
@@ -37,18 +81,32 @@ void main() {
 	vec3 color = vColor;
 	float depth = gl_FragCoord.z;
 
+	#if defined (clip_horizontally) || defined (clip_vertically)
+	vec2 ndc = vec2((gl_FragCoord.x / screenWidth), 1.0 - (gl_FragCoord.y / screenHeight));
+
+	if(step(clipExtent.x, ndc.x) * step(ndc.x, clipExtent.z) < 1.0)
+	{
+		discard;
+	}
+
+	if(step(clipExtent.y, ndc.y) * step(ndc.y, clipExtent.w) < 1.0)
+	{
+		discard;
+	}
+	#endif  
+
 	#if defined(circle_point_shape) || defined(paraboloid_point_shape) || defined (weighted_splats)
 		float u = 2.0 * gl_PointCoord.x - 1.0;
 		float v = 2.0 * gl_PointCoord.y - 1.0;
 	#endif
-	
+
 	#if defined(circle_point_shape) || defined (weighted_splats)
 		float cc = u*u + v*v;
 		if(cc > 1.0){
 			discard;
 		}
 	#endif
-	
+
 	#if defined weighted_splats
 		vec2 uv = gl_FragCoord.xy / vec2(screenWidth, screenHeight);
 		float sDepth = texture2D(depthMap, uv).r;
@@ -56,21 +114,49 @@ void main() {
 			discard;
 		}
 	#endif
-		
+
 	#if defined color_type_point_index
 		gl_FragColor = vec4(color, pcIndex / 255.0);
 	#else
 		gl_FragColor = vec4(color, vOpacity);
 	#endif
 
-	vec3 normal = normalize( vNormal );
-	normal.z = abs(normal.z);
-	vec3 viewPosition = normalize( vViewPosition );
-	
-	#if defined(color_type_phong)
+	#ifdef use_point_cloud_mixing
+		bool discardFragment = false;
 
-	// code taken from three.js phong light fragment shader
-	
+		if (pointCloudMixingMode == 1) {  // Checkboard
+			float vPointCloudID = pointCloudID > 10. ? pointCloudID/10.: pointCloudID;
+			discardFragment = mod(gl_FragCoord.x, vPointCloudID) > 0.5 && mod(gl_FragCoord.y, vPointCloudID) > 0.5;
+		}
+		else if (pointCloudMixingMode == 2) {  // Stripes
+			float angle = pointCloudMixAngle * pointCloudID / 180.;
+			float u = cos(angle) * gl_FragCoord.x + sin(angle) * gl_FragCoord.y;
+			float v = -sin(angle) * gl_FragCoord.x + cos(angle) * gl_FragCoord.y;
+
+			discardFragment = mod(u, stripeDistanceX) >= stripeDistanceX/stripeDivisorX && mod(v, stripeDistanceY) >= stripeDistanceY/stripeDivisorY;
+		}
+		if (discardFragment) {
+			discard;
+		}
+	#endif
+
+	#ifdef use_texture_blending
+		vec2 vUv = gl_FragCoord.xy / vec2(screenWidth, screenHeight);
+
+		vec4 tColor = texture2D(backgroundMap, vUv);
+		gl_FragColor = vec4(vOpacity * color, 1.) + vec4((1. - vOpacity) * tColor.rgb, 0.);
+	#endif
+
+	#if defined(color_type_phong)
+		#if MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0
+			vec3 normal = normalize( vNormal );
+			normal.z = abs(normal.z);
+
+			vec3 viewPosition = normalize( vViewPosition );
+		#endif
+
+		// code taken from three.js phong light fragment shader
+
 		#if MAX_POINT_LIGHTS > 0
 
 			vec3 pointDiffuse = vec3( 0.0 );
@@ -118,9 +204,9 @@ void main() {
 				pointSpecular += schlick * pointLightColor[ i ] * pointSpecularWeight * pointDiffuseWeight * lDistance * specularNormalization;
 				pointSpecular = vec3(0.0, 0.0, 0.0);
 			}
-		
+
 		#endif
-		
+
 		#if MAX_DIR_LIGHTS > 0
 
 			vec3 dirDiffuse = vec3( 0.0 );
@@ -163,41 +249,41 @@ void main() {
 			}
 
 		#endif
-		
+
 		vec3 totalDiffuse = vec3( 0.0 );
 		vec3 totalSpecular = vec3( 0.0 );
-		
+
 		#if MAX_POINT_LIGHTS > 0
 
 			totalDiffuse += pointDiffuse;
 			totalSpecular += pointSpecular;
 
 		#endif
-		
+
 		#if MAX_DIR_LIGHTS > 0
 
 			totalDiffuse += dirDiffuse;
 			totalSpecular += dirSpecular;
 
 		#endif
-		
+
 		gl_FragColor.xyz = gl_FragColor.xyz * ( emissive + totalDiffuse + ambientLightColor * ambient ) + totalSpecular;
 
 	#endif
-	
+
 	#if defined weighted_splats
 	    //float w = pow(1.0 - (u*u + v*v), blendHardness);
-		
+
 		float wx = 2.0 * length(2.0 * gl_PointCoord - 1.0);
 		float w = exp(-wx * wx * 0.5);
-		
+
 		//float distance = length(2.0 * gl_PointCoord - 1.0);
 		//float w = exp( -(distance * distance) / blendHardness);
-		
+
 		gl_FragColor.rgb = gl_FragColor.rgb * w;
 		gl_FragColor.a = w;
 	#endif
-	
+
 	#if defined paraboloid_point_shape
 		float wi = 0.0 - ( u*u + v*v);
 		vec4 pos = vec4(vViewPosition, 1.0);
@@ -208,19 +294,25 @@ void main() {
 		float expDepth = pos.z;
 		depth = (pos.z + 1.0) / 2.0;
 		gl_FragDepthEXT = depth;
-		
+
 		#if defined(color_type_depth)
 			gl_FragColor.r = linearDepth;
 			gl_FragColor.g = expDepth;
 		#endif
-		
+
 		#if defined(use_edl)
 			gl_FragColor.a = log2(linearDepth);
 		#endif
-		
+
 	#else
 		#if defined(use_edl)
 			gl_FragColor.a = vLogDepth;
 		#endif
-	#endif	
+	#endif
+
+	#ifdef highlight_point
+		if (vHighlight > 0.0) {
+			gl_FragColor = highlightedPointColor;
+		}
+	#endif
 }
