@@ -10,6 +10,7 @@ import { createChildAABB } from '../utils/bounds';
 import { getIndexFromName } from '../utils/utils';
 import { Version } from '../version';
 import { BinaryLoader } from './binary-loader';
+import { LasLazLoader } from './las-laz-loader';
 import { GetUrlFn, XhrRequest } from './types';
 
 interface BoundingBoxData {
@@ -28,7 +29,7 @@ interface POCJson {
   points: number;
   boundingBox: BoundingBoxData;
   tightBoundingBox?: BoundingBoxData;
-  pointAttributes: PointAttributeStringName[];
+  pointAttributes: 'LAS' | 'LAZ' | PointAttributeStringName[];
   spacing: number;
   scale: number;
   hierarchyStepSize: number;
@@ -42,52 +43,75 @@ interface POCJson {
  * @param getUrl
  *    Function which receives the relative URL of a point cloud chunk file which is to be loaded
  *    and shoud return a new url (e.g. signed) in the form of a string or a promise.
- *
+ * @param xhrRequest An arrow function for a fetch request
  * @returns
  *    An observable which emits once when the first LOD of the point cloud is loaded.
  */
-export function loadPOC(url: string, getUrl: GetUrlFn, xhrRequest = fetch): Promise<PointCloudOctreeGeometry> {
+export function loadPOC(
+  url: string,
+  getUrl: GetUrlFn,
+  xhrRequest: XhrRequest,
+): Promise<PointCloudOctreeGeometry> {
   return Promise.resolve(getUrl(url)).then(transformedUrl => {
     return xhrRequest(transformedUrl, { mode: 'cors' })
-        .then(res => res.json())
-        .then(parse(transformedUrl, getUrl, xhrRequest));
+      .then(res => res.json())
+      .then(parse(transformedUrl, xhrRequest));
   });
 }
 
-function parse(url: string, getUrl: GetUrlFn, xhrRequest: XhrRequest) {
+function parse(transformedUrl: string, xhrRequest: XhrRequest) {
   return (data: POCJson): Promise<PointCloudOctreeGeometry> => {
     const { offset, boundingBox, tightBoundingBox } = getBoundingBoxes(data);
 
-    const loader = new BinaryLoader({
-      getUrl,
-      version: data.version,
+    let loader: BinaryLoader | LasLazLoader;
+    const useLASLAZ = data.pointAttributes === 'LAS' || data.pointAttributes === 'LAZ';
+
+    if (useLASLAZ) {
+      loader = new LasLazLoader({
+        version: data.version,
+        extension: data.pointAttributes as string,
+        xhrRequest
+      });
+    } else {
+      loader = new BinaryLoader({
+        version: data.version,
+        boundingBox,
+        scale: data.scale,
+        xhrRequest
+      });
+    }
+    const pco = new PointCloudOctreeGeometry(
+      loader,
       boundingBox,
-      scale: data.scale,
-      xhrRequest
-    });
+      tightBoundingBox,
+      offset,
+      xhrRequest,
+    );
 
-    const pco = new PointCloudOctreeGeometry(loader, boundingBox, tightBoundingBox, offset, xhrRequest);
 
-    pco.octreeDir = data.octreeDir.indexOf('http') === 0 ? data.octreeDir : `${url}/../${data.octreeDir}`;
-    pco.url = url;
+    pco.octreeDir = data.octreeDir.indexOf('http') === 0 ? data.octreeDir : `${transformedUrl}/../${data.octreeDir}`;
+    pco.url = transformedUrl;
     pco.needsUpdate = true;
     pco.spacing = data.spacing;
     pco.hierarchyStepSize = data.hierarchyStepSize;
     pco.projection = data.projection;
     pco.offset = offset;
-    pco.pointAttributes = new PointAttributes(data.pointAttributes);
+
+    if (!useLASLAZ) {
+      pco.pointAttributes = new PointAttributes(data.pointAttributes as PointAttributeStringName[]);
+    }
 
     const nodes: Record<string, PointCloudOctreeGeometryNode> = {};
 
     const version = new Version(data.version);
 
     return loadRoot(pco, data, nodes, version).then(() => {
+      if (version.upTo('1.4')) {
+        loadRemainingHierarchy(pco, data, nodes);
+      }
 
-        if (version.upTo('1.4'))
-            loadRemainingHierarchy(pco, data, nodes);
-
-        pco.nodes = nodes;
-        return pco;
+      pco.nodes = nodes;
+      return pco;
     });
   };
 }

@@ -25,8 +25,11 @@ uniform float screenWidth;
 uniform float screenHeight;
 uniform float fov;
 uniform float spacing;
-uniform float near;
-uniform float far;
+
+#if defined dual_vertical_range_highlight
+	uniform vec2 verticalRange1;
+	uniform vec2 verticalRange2;
+#endif
 
 #if defined use_clip_box
 	uniform mat4 clipBoxes[max_clip_boxes];
@@ -46,7 +49,9 @@ uniform float level;
 uniform float vnStart;
 uniform bool isLeafNode;
 
+uniform float filterByNormalThreshold;
 uniform vec2 intensityRange;
+uniform float opacityAttenuation;
 uniform float intensityGamma;
 uniform float intensityContrast;
 uniform float intensityBrightness;
@@ -66,14 +71,32 @@ uniform sampler2D gradient;
 uniform sampler2D classificationLUT;
 uniform sampler2D depthMap;
 
-varying float	vOpacity;
-varying vec3	vColor;
-varying float	vLinearDepth;
-varying float	vLogDepth;
-varying vec3	vViewPosition;
-varying float vRadius;
-varying vec3	vWorldPosition;
-varying vec3	vNormal;
+varying vec3 vColor;
+
+#if !defined(color_type_point_index)
+	varying float vOpacity;
+#endif
+
+#if defined(weighted_splats)
+	varying float vLinearDepth;
+#endif
+
+#if !defined(paraboloid_point_shape) && defined(use_edl)
+	varying float vLogDepth;
+#endif
+
+#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0) || defined(paraboloid_point_shape)
+	varying vec3 vViewPosition;
+#endif
+
+#if defined(weighted_splats) || defined(paraboloid_point_shape)
+	varying float vRadius;
+#endif
+
+#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0)
+	varying vec3 vNormal;
+#endif
+
 
 // ---------------------
 // OCTREE
@@ -286,7 +309,7 @@ float getIntensity() {
 
 vec3 getElevation() {
 	vec4 world = modelMatrix * vec4( position, 1.0 );
-	float w = (world.z - heightMin) / (heightMax-heightMin);
+	float w = (world.y - heightMin) / (heightMax-heightMin);
 	vec3 cElevation = texture2D(gradient, vec2(w,1.0-w)).rgb;
 	
 	return cElevation;
@@ -350,14 +373,34 @@ vec3 getCompositeColor() {
 	return c;
 }
 
+vec3 getSaturatedColor(vec3 color, float luminance, float saturation) {
+    return vec3(
+        mix(luminance, color.r, saturation),
+        mix(luminance, color.g, saturation),
+        mix(luminance, color.b, saturation)
+    );
+}
+
 void main() {
 	vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-	vViewPosition = mvPosition.xyz;
+
 	gl_Position = projectionMatrix * mvPosition;
-	vOpacity = opacity;
-	vLinearDepth = gl_Position.w;
-	vLogDepth = log2(-mvPosition.z);
-	vNormal = normalize(normalMatrix * normal);
+
+	#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0) || defined(paraboloid_point_shape)
+		vViewPosition = mvPosition.xyz;
+	#endif
+
+	#if defined weighted_splats
+		vLinearDepth = gl_Position.w;
+	#endif
+
+	#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0)
+		vNormal = normalize(normalMatrix * normal);
+	#endif
+
+	#if !defined(paraboloid_point_shape) && defined(use_edl)
+		vLogDepth = log2(-mvPosition.z);
+	#endif
 
 	// ---------------------
 	// POINT SIZE
@@ -365,7 +408,7 @@ void main() {
 
 	float pointSize = 1.0;
 	float slope = tan(fov / 2.0);
-	float projFactor =  -0.5 * screenHeight / (slope * vViewPosition.z);
+	float projFactor =  -0.5 * screenHeight / (slope * mvPosition.z);
 
 	#if defined fixed_point_size
 		pointSize = size;
@@ -379,9 +422,34 @@ void main() {
 	pointSize = max(minSize, pointSize);
 	pointSize = min(maxSize, pointSize);
 
-	vRadius = pointSize / projFactor;
+	#if defined(weighted_splats) || defined(paraboloid_point_shape)
+		vRadius = pointSize / projFactor;
+	#endif
 	
 	gl_PointSize = pointSize;
+
+	// ---------------------
+	// OPACITY
+	// ---------------------
+
+	#ifndef color_type_point_index
+		#ifdef attenuated_opacity
+			vOpacity = opacity * exp(-length(-mvPosition.xyz) / opacityAttenuation);
+		#else
+			vOpacity = opacity;
+		#endif
+	#endif
+
+	// ---------------------
+	// FILTERING
+	// ---------------------
+
+	#ifdef use_filter_by_normal
+		if(abs((modelViewMatrix * vec4(normal, 0.0)).z) > filterByNormalThreshold) {
+			// Move point outside clip space space to discard it.
+			gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+		}
+	#endif
 
 	// ---------------------
 	// POINT COLOR
@@ -432,12 +500,35 @@ void main() {
 			return;
 		}
 	#endif
-	
+
+   	// ---------------------
+	// Y RANGE HIGHLIGHT
+	// ---------------------
+
+     #if defined dual_vertical_range_highlight
+        vec4 world = modelMatrix * vec4( position, 1.0 );
+
+        bool insideRange1 = verticalRange1[0] <= world.y && world.y <= verticalRange1[1];
+        bool insideRange2 = verticalRange2[0] <= world.y && world.y <= verticalRange2[1];
+
+        vec3 LuminanceWeights = vec3(0.299,0.587,0.114);
+        float luminance = dot(vColor,LuminanceWeights);
+        if (insideRange2) {
+            vColor = getSaturatedColor(vec3(1.0, 0.8196, 0.0), luminance*1.1, 0.5);
+        } else if (insideRange1) {
+            vColor = getSaturatedColor(vec3(0.2, 0.5843, 1.0), luminance, 0.5);
+        } else {
+            vColor = getSaturatedColor(vColor, luminance, 0.2);
+        }
+    #endif
+
+	// ---------------------
 	// CLIPPING
-	
-	#if defined use_clip_box
+	// ---------------------
+
+	#if defined(use_clip_box) && !defined(dual_vertical_range_highlight)
 		bool insideAny = false;
-		for (int i = 0; i < MAX_CLIP_BOXES; i++) {
+		for (int i = 0; i < max_clip_boxes; i++) {
 			if (i == int(clipBoxCount)) {
 				break;
 			}

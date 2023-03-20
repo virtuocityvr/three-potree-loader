@@ -6,7 +6,7 @@ import { Box3, BufferAttribute, BufferGeometry, Uint8BufferAttribute, Vector3 } 
 import { PointAttributeName, PointAttributeType } from '../point-attributes';
 import { PointCloudOctreeGeometryNode } from '../point-cloud-octree-geometry-node';
 import { Version } from '../version';
-import { GetUrlFn, XhrRequest } from './types';
+import { XhrRequest } from './types';
 
 interface AttributeData {
   attribute: {
@@ -28,29 +28,29 @@ interface WorkerResponse {
 }
 
 interface BinaryLoaderOptions {
-  getUrl?: GetUrlFn;
   version: string;
   boundingBox: Box3;
   scale: number;
   xhrRequest: XhrRequest;
 }
 
+type Callback = (node: PointCloudOctreeGeometryNode) => void;
+
 export class BinaryLoader {
   version: Version;
   boundingBox: Box3;
   scale: number;
-  getUrl: GetUrlFn;
   disposed: boolean = false;
   xhrRequest: XhrRequest;
+  callbacks: Callback[];
 
   private workers: Worker[] = [];
 
   constructor({
-    getUrl = s => Promise.resolve(s),
     version,
     boundingBox,
     scale,
-    xhrRequest
+    xhrRequest,
   }: BinaryLoaderOptions) {
     if (typeof version === 'string') {
       this.version = new Version(version);
@@ -59,9 +59,9 @@ export class BinaryLoader {
     }
 
     this.xhrRequest = xhrRequest;
-    this.getUrl = getUrl;
     this.boundingBox = boundingBox;
     this.scale = scale;
+    this.callbacks = [];
   }
 
   dispose(): void {
@@ -76,10 +76,12 @@ export class BinaryLoader {
       return Promise.resolve();
     }
 
-    return Promise.resolve(this.getUrl(this.getNodeUrl(node)))
+    return Promise.resolve(this.getNodeUrl(node))
       .then(url => this.xhrRequest(url, { mode: 'cors' }))
       .then(res => res.arrayBuffer())
-      .then(buffer => this.parse(node, buffer));
+      .then(buffer => {
+        return new Promise(resolve => this.parse(node, buffer, resolve));
+      });
   }
 
   private getNodeUrl(node: PointCloudOctreeGeometryNode): string {
@@ -91,8 +93,13 @@ export class BinaryLoader {
     return url;
   }
 
-  private parse(node: PointCloudOctreeGeometryNode, buffer: ArrayBuffer): void {
+  private parse(
+    node: PointCloudOctreeGeometryNode,
+    buffer: ArrayBuffer,
+    resolve: () => void,
+  ): void {
     if (this.disposed) {
+      resolve();
       return;
     }
 
@@ -107,6 +114,7 @@ export class BinaryLoader {
 
     worker.onmessage = (e: WorkerResponse) => {
       if (this.disposed) {
+        resolve();
         return;
       }
 
@@ -123,10 +131,14 @@ export class BinaryLoader {
       node.tightBoundingBox = this.getTightBoundingBox(data.tightBoundingBox);
       node.loaded = true;
       node.loading = false;
+      node.failed = false;
       node.pcoGeometry.numNodesLoading--;
       node.pcoGeometry.needsUpdate = true;
 
       this.releaseWorker(worker);
+
+      this.callbacks.forEach(callback => callback(node));
+      resolve();
     };
 
     const message = {
@@ -144,12 +156,12 @@ export class BinaryLoader {
   }
 
   private getWorker(): Worker {
-    let worker = this.workers.pop();
+    const worker = this.workers.pop();
     if (worker) {
       return worker;
     }
 
-    const ctor = require('worker-loader?inline!../workers/binary-decoder-worker.js');
+    const ctor = require('../workers/binary-decoder.worker.js');
     return new ctor();
   }
 
@@ -173,19 +185,19 @@ export class BinaryLoader {
       const buffer = buffers[property].buffer;
 
       if (this.isAttribute(property, PointAttributeName.POSITION_CARTESIAN)) {
-        geometry.addAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
       } else if (this.isAttribute(property, PointAttributeName.COLOR_PACKED)) {
-        geometry.addAttribute('color', new BufferAttribute(new Uint8Array(buffer), 3, true));
+        geometry.setAttribute('color', new BufferAttribute(new Uint8Array(buffer), 3, true));
       } else if (this.isAttribute(property, PointAttributeName.INTENSITY)) {
-        geometry.addAttribute('intensity', new BufferAttribute(new Float32Array(buffer), 1));
+        geometry.setAttribute('intensity', new BufferAttribute(new Float32Array(buffer), 1));
       } else if (this.isAttribute(property, PointAttributeName.CLASSIFICATION)) {
-        geometry.addAttribute('classification', new BufferAttribute(new Uint8Array(buffer), 1));
+        geometry.setAttribute('classification', new BufferAttribute(new Uint8Array(buffer), 1));
       } else if (this.isAttribute(property, PointAttributeName.NORMAL_SPHEREMAPPED)) {
-        geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
       } else if (this.isAttribute(property, PointAttributeName.NORMAL_OCT16)) {
-        geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
       } else if (this.isAttribute(property, PointAttributeName.NORMAL)) {
-        geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+        geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
       }
     });
   }
@@ -193,13 +205,13 @@ export class BinaryLoader {
   private addIndices(geometry: BufferGeometry, indices: ArrayBuffer): void {
     const indicesAttribute = new Uint8BufferAttribute(indices, 4);
     indicesAttribute.normalized = true;
-    geometry.addAttribute('indices', indicesAttribute);
+    geometry.setAttribute('indices', indicesAttribute);
   }
 
   private addNormalAttribute(geometry: BufferGeometry, numPoints: number): void {
     if (!geometry.getAttribute('normal')) {
       const buffer = new Float32Array(numPoints * 3);
-      geometry.addAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+      geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
     }
   }
 

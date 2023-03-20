@@ -15,21 +15,37 @@ uniform float blendHardness;
 uniform float blendDepthSupplement;
 uniform float fov;
 uniform float spacing;
-uniform float near;
-uniform float far;
 uniform float pcIndex;
 uniform float screenWidth;
 uniform float screenHeight;
 
 uniform sampler2D depthMap;
 
-varying vec3	vColor;
-varying float	vOpacity;
-varying float	vLinearDepth;
-varying float	vLogDepth;
-varying vec3	vViewPosition;
-varying float	vRadius;
-varying vec3	vNormal;
+varying vec3 vColor;
+
+#if !defined(color_type_point_index)
+	varying float vOpacity;
+#endif
+
+#if defined(weighted_splats)
+	varying float vLinearDepth;
+#endif
+
+#if !defined(paraboloid_point_shape) && defined(use_edl)
+	varying float vLogDepth;
+#endif
+
+#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0) || defined(paraboloid_point_shape)
+	varying vec3 vViewPosition;
+#endif
+
+#if defined(weighted_splats) || defined(paraboloid_point_shape)
+	varying float vRadius;
+#endif
+
+#if defined(color_type_phong) && (MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0)
+	varying vec3 vNormal;
+#endif
 
 float specularStrength = 1.0;
 
@@ -63,13 +79,15 @@ void main() {
 		gl_FragColor = vec4(color, vOpacity);
 	#endif
 
-	vec3 normal = normalize( vNormal );
-	normal.z = abs(normal.z);
-	vec3 viewPosition = normalize( vViewPosition );
-	
 	#if defined(color_type_phong)
+		#if MAX_POINT_LIGHTS > 0 || MAX_DIR_LIGHTS > 0
+			vec3 normal = normalize( vNormal );
+			normal.z = abs(normal.z);
 
-	// code taken from three.js phong light fragment shader
+			vec3 viewPosition = normalize( vViewPosition );
+		#endif
+
+		// code taken from three.js phong light fragment shader
 	
 		#if MAX_POINT_LIGHTS > 0
 
@@ -222,5 +240,10 @@ void main() {
 		#if defined(use_edl)
 			gl_FragColor.a = vLogDepth;
 		#endif
-	#endif	
+	#endif
+
+	#if defined(grayscale)
+		float gray = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
+		gl_FragColor = vec4(vec3(gray), gl_FragColor.a);
+	#endif
 }

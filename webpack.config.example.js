@@ -11,7 +11,7 @@ module.exports = {
     filename: 'example.bundle.js',
     path: buildPath,
   },
-  devtool: 'cheap-eval-source-map',
+  devtool: 'source-map',
   devServer: {
     contentBase: buildPath,
     compress: true,
@@ -24,9 +24,20 @@ module.exports = {
   module: {
     rules: [
       {
+        test: /\.worker\.js$/,
+        loader: 'worker-loader',
+        options: { inline: true, fallback: false },
+      },
+      {
         test: /\.js$/,
         exclude: /node_modules/,
         loader: 'babel-loader',
+      },
+      {
+        test: /orker\.js$/,
+        use: {
+          loader: 'worker-loader',
+        }
       },
       {
         test: /\.tsx?$/,
@@ -50,6 +61,7 @@ module.exports = {
         test: /\.css$/,
         use: ['style-loader', 'css-loader'],
       },
+
     ],
   },
   plugins: [new HtmlWebpackPlugin()],

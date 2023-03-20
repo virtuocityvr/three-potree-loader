@@ -1,4 +1,4 @@
-import { Box3, PerspectiveCamera, Sphere, WebGLRenderer } from 'three';
+import { Box3, Camera, Sphere, Vector3, WebGLRenderer } from 'three';
 import { GetUrlFn, XhrRequest } from './loading/types';
 import { PointCloudOctree } from './point-cloud-octree';
 import { LRU } from './utils/lru';
@@ -24,6 +24,19 @@ export interface IPointCloudTreeNode {
 export interface IVisibilityUpdateResult {
   visibleNodes: IPointCloudTreeNode[];
   numVisiblePoints: number;
+  /**
+   * True when a node has been loaded but was not added to the scene yet.
+   * Make sure to call updatePointClouds() again on the next frame.
+   */
+  exceededMaxLoadsToGPU: boolean;
+  /**
+   * True when at least one node in view has failed to load.
+   */
+  nodeLoadFailed: boolean;
+  /**
+   * Promises for loading nodes, will reject when loading fails.
+   */
+  nodeLoadPromises: Promise<void>[];
 }
 
 export interface IPotree {
@@ -35,7 +48,19 @@ export interface IPotree {
 
   updatePointClouds(
     pointClouds: PointCloudOctree[],
-    camera: PerspectiveCamera,
+    camera: Camera,
     renderer: WebGLRenderer,
   ): IVisibilityUpdateResult;
+}
+
+export interface PickPoint {
+  position?: Vector3;
+  normal?: Vector3;
+  pointCloud?: PointCloudOctree;
+  [property: string]: any;
+}
+
+export interface PointCloudHit {
+  pIndex: number;
+  pcIndex: number;
 }

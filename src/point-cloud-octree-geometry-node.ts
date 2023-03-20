@@ -40,9 +40,10 @@ export class PointCloudOctreeGeometryNode extends EventDispatcher implements IPo
   boundingSphere: Sphere;
   mean: Vector3 = new Vector3();
   numPoints: number = 0;
-  geometry: BufferGeometry = new BufferGeometry();
+  geometry: BufferGeometry | undefined;
   loaded: boolean = false;
   loading: boolean = false;
+  failed: boolean = false;
   parent: PointCloudOctreeGeometryNode | null = null;
   oneTimeDisposeHandlers: (() => void)[] = [];
   isLeafNode: boolean = true;
@@ -68,7 +69,7 @@ export class PointCloudOctreeGeometryNode extends EventDispatcher implements IPo
     }
 
     this.geometry.dispose();
-    this.geometry = new BufferGeometry();
+    this.geometry = undefined;
     this.loaded = false;
 
     this.oneTimeDisposeHandlers.forEach(handler => handler());
@@ -146,15 +147,24 @@ export class PointCloudOctreeGeometryNode extends EventDispatcher implements IPo
     this.pcoGeometry.numNodesLoading++;
     this.pcoGeometry.needsUpdate = true;
 
+    let promise: Promise<void>;
+
     if (
       this.pcoGeometry.loader.version.equalOrHigher('1.5') &&
       this.level % this.pcoGeometry.hierarchyStepSize === 0 &&
       this.hasChildren
     ) {
-      return this.loadHierachyThenPoints();
+      promise = this.loadHierachyThenPoints();
     } else {
-      return this.loadPoints();
+      promise = this.loadPoints();
     }
+
+    return promise.catch(reason => {
+      this.loading = false;
+      this.failed = true;
+      this.pcoGeometry.numNodesLoading--;
+      throw reason;
+    });
   }
 
   private canLoad(): boolean {
@@ -177,7 +187,7 @@ export class PointCloudOctreeGeometryNode extends EventDispatcher implements IPo
       return Promise.resolve();
     }
 
-    return Promise.resolve(this.pcoGeometry.loader.getUrl(this.getHierarchyUrl()))
+    return Promise.resolve(this.getHierarchyUrl())
       .then(url => this.pcoGeometry.xhrRequest(url, { mode: 'cors' }))
       .then(res => res.arrayBuffer())
       .then(data => this.loadHierarchy(this, data));

@@ -1,6 +1,5 @@
 const path = require('path');
 const SizePlugin = require('size-plugin');
-// const BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
 
 module.exports = {
   entry: './src/index.ts',
@@ -11,7 +10,7 @@ module.exports = {
     libraryTarget: 'umd',
     umdNamedDefine: true,
   },
-  devtool: 'cheap-eval-source-map',
+  devtool: 'source-map',
   stats: 'errors-only',
   resolve: {
     extensions: ['.ts', '.tsx', '.js'],
@@ -19,6 +18,11 @@ module.exports = {
   externals: ['three'],
   module: {
     rules: [
+      {
+        test: /\.worker\.js$/,
+        loader: 'worker-loader',
+        options: { inline: true, fallback: false },
+      },
       {
         test: /\.js$/,
         exclude: /node_modules/,
@@ -29,6 +33,7 @@ module.exports = {
         loader: 'ts-loader',
         exclude: /node_modules/,
       },
+
       { test: /\.(vs|fs|glsl|vert|frag)$/, loader: 'raw-loader' },
     ],
   },
