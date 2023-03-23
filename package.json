@@ -25,9 +25,8 @@
     "prettier": "prettier --write \"**/*.js\" \"**/*.jsx\" \"**/*.tsx\" \"**/*.ts\"",
     "prepare-release": "standard-version"
   },
-  "dependencies": {},
   "peerDependencies": {
-    "three": "~0.139.0"
+    "three": "^0.149.0"
   },
   "devDependencies": {
     "@babel/core": "^7.17.8",
@@ -48,7 +47,7 @@
     "size-plugin": "^3.0.0",
     "standard-version": "^9.3.2",
     "style-loader": "^2.0.0",
-    "three": "~0.139.0",
+    "three": "^0.149.0",
     "three-orbit-controls": "^82.1.0",
     "ts-loader": "^8.2.0",
     "tslint": "^6.1.3",
