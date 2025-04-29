@@ -3,7 +3,6 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import {
   PointCloudOctree,
   Potree,
-  PotreeVersion,
   PointColorType,
   PointSizeType,
   PointCloudMaterial,

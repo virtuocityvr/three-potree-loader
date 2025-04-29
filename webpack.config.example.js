@@ -14,7 +14,7 @@ module.exports = {
   devtool: 'eval-cheap-source-map',
   devServer: {
     compress: true,
-    port: 5000,
+    port: 9909,
   },
   stats: 'errors-only',
   resolve: {
@@ -25,18 +25,15 @@ module.exports = {
       {
         test: /\.worker\.js$/,
         loader: 'worker-loader',
-        options: { inline: 'no-fallback' },
+        options: {
+          filename: '[name].[contenthash].worker.js', // Ensure unique filenames
+          inline: 'no-fallback',
+        },
       },
       {
         test: /\.js$/,
         exclude: /node_modules/,
         loader: 'babel-loader',
-      },
-      {
-        test: /orker\.js$/,
-        use: {
-          loader: 'worker-loader',
-        }
       },
       {
         test: /\.tsx?$/,

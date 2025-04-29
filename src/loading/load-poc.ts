@@ -7,7 +7,7 @@ import { PointAttributes, PointAttributeStringName } from '../point-attributes';
 import { PointCloudOctreeGeometry } from '../point-cloud-octree-geometry';
 import { PointCloudOctreeGeometryNode } from '../point-cloud-octree-geometry-node';
 import { createChildAABB } from '../utils/bounds';
-import { getIndexFromName, handleFailedRequest } from '../utils/utils';
+import { getIndexFromName } from '../utils/utils';
 import { Version } from '../version';
 import { BinaryLoader } from './binary-loader';
 import { LasLazLoader } from './las-laz-loader';
